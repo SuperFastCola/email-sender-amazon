@@ -1,7 +1,7 @@
 <?php
 
 //running command from liquidweb
-// /usr/bin/php ./mailsend/mailsender5.0.php AMAZONUSERTOKEN preview 2014/06/12 subject:Email-from-Amazon test
+// /usr/bin/php ./mailsender6.0.php aws-access-token preview 2014/06/12 subject:Email-from-Amazon test
 
 date_default_timezone_set('America/New_York');
 
@@ -56,10 +56,11 @@ function sendAdminEmail($subject,$body){
 	));
 }
 
-$matchup_image_location = "http://s3.amazonaws.com/images.yoururl.com/";
+//set this to bucket location
+$matchup_image_location = "";
 
-define('DOCUMENT_ROOT', dirname(realpath(__FILE__)) . "/"); // need to add trailing slash
-define('DOCUMENT_ROOT_CREDS', preg_replace("/(public_html|mailsend)/i","",dirname(realpath(__FILE__)))); // need to add trailing slash
+define('CURRENT_DIRECTORY', dirname(realpath(__FILE__)) . "/"); // need to add trailing slash
+define('DOCUMENT_ROOT', preg_replace("/emails\//i","",CURRENT_DIRECTORY)); // need to add trailing slash
 
 //open stream to standard input
 if(!defined('STDIN')){
@@ -68,15 +69,16 @@ if(!defined('STDIN')){
 
 set_error_handler("myErrorHandler");
 
-require_once(DOCUMENT_ROOT_CREDS . "vendor/autoload.php");
-require_once(DOCUMENT_ROOT_CREDS . "connection2.0.php");
-
-$replyemail = "watchthematch@espnworldcupcentral.com";
-$adminEmails = array("anthony@deluxeluxury.com");
+require_once(DOCUMENT_ROOT . "config.php");
+require_once(DOCUMENT_ROOT . "vendor/autoload.php");
+require_once(CURRENT_DIRECTORY . "includes/db.php");
+require_once(CURRENT_DIRECTORY . "EmailContent.php");
 
 use Aws\Common\Aws;
+$aws = Aws::factory((DOCUMENT_ROOT . $env_config['aws_credentials_file']));
 
-$aws = Aws::factory(DOCUMENT_ROOT_CREDS . "credentials.php");
+$replyemail = "anthony@deluxeluxury.com";
+$adminEmails = array("anthony@deluxeluxury.com");
 
 $testing = false;
 $sendemail = true;
@@ -87,7 +89,7 @@ $preview = false;
 // Get the client from the builder by namespace
 $client = $aws->get('Ses');
 
-if(defined('STDIN')){
+if(defined('STDIN') && isset($argv)){
   	$token = (isset($argv[1]))?$argv[1]:NULL;
 
   	foreach($argv as $a){
@@ -120,33 +122,39 @@ if(defined('STDIN')){
 }
 else {
 	$token = (isset($_REQUEST["token"]))?$_REQUEST["token"]:NULL;
+
+	if(isset($_REQUEST["test"])){
+  			$testing = true;	
+  		}
+
+  	if(isset($_REQUEST["date"]) &&  preg_match("/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/i",$_REQUEST["date"])){
+		$testdate = $a;
+	}
+
 }
 
 //to adjust current time to eastern
-$timezone_adjust = 4 * 60 * 60;
+$timezone_adjust = 5 * 60 * 60;
+$timezone_adjust = 0;
 
 //todays date for games
-if(isset($_REQUEST['dy'])){
-	  $dy=strtotime("January 1st +".($_REQUEST['dy']-1)." days");
-	  $curdate2 = date('y/m/d',$dy);
-}else{
- 	$curdate = date('y/m/d');
-}
+$curdate = date('y-m-d');
 
-echo $curdate . "\n";
 
 if(isset($testdate)){
 	$curdate = $testdate;	
 }
 
-$gmtxt="SELECT * FROM tbl_games WHERE air_date='" . $curdate . "' order by notify ASC";
+echo $curdate . "\n";
+
+$gmtxt="SELECT * FROM prizes WHERE prize_day='" . $curdate . "'";
 $myDB->execute($gmtxt);
 
-if(isset($token) && $token=="AMAZONUSERTOKEN" && $myDB->dataRows()>0){
+if(isset($token) && $token==$env_config['aws_access_token'] && $myDB->dataRows()>0){
 
-	//used for updating the database in reminder_emails
+	//used for updating the database in sweepsentries
 	$sent_timestamp = mktime(date("H"),date("i"),date("s"),date("n"),date("j"),date("Y")); 
-	$day_timestamp = mktime(0,0,0,date("n"),date("j"),date("Y")) - 4 * 60 * 60;
+	$day_timestamp = mktime(0,0,0,date("n"),date("j"),date("Y")) - $timezone_adjust;
 	$sent_readable = date('Y-m-d H:i:s',$sent_timestamp);
 	$cache_buster = "?t=" . time();
 
@@ -165,36 +173,22 @@ if(isset($token) && $token=="AMAZONUSERTOKEN" && $myDB->dataRows()>0){
 			$games_info = $games;
 	}
 
-	$game_html_code = "";
-
-	for($i=0;$i<sizeof($games_info);$i++){
-
-		$emailcpy=$games_info[$i]["eml_copy"];
-
-		$game_html_code .= "<tr><td class='tblairs' style='font-family: Arial, Helvetica, sans-serif; width:98px; font-size: 14px; height: 102px; font-weight:700; color: #ffffff !important; text-align:center; background-color:#4d4d4d; border-bottom: 2px solid #000000;'><a href='#' class='email_matchtime' style='color: #ffffff; text-decoration: none;'>".$games_info[$i]['air_start']." ET</a></td><td class='tblimg' style='border-bottom: 2px solid #000000;'>";
-
-		//this will be used in body of email on WATCHESPN
-		$gamelink = "http://links.espnworldcupcentral.com/?gameid=".$games_info[$i]['game_id']."&amp;src=email&amp;ua=MVPDQA";
-
-	  	$game_html_code .="<a href='". $gamelink ."'>";
-	  	$game_html_code .="<img src='"  .  $matchup_image_location  . "game_".$games_info[$i]['game_id'].".jpg" . $cache_buster . "' alt='".$games_info[$i]['team1']." vs. ".$games_info[$i]['team2']."' ";
-	  	$game_html_code .="width='367' height='102' border='0' style='display:block; padding:0px; margin:0px;' /></a></td></tr>";
-	}
-
 	//create date time stamp with first matchup
-	$email_display_time_stamp = strtotime($games_info[0]['day_cpy'] . ", 2014 " . $games_info[0]['air_start']);
-	
+	$email_display_time_stamp = strtotime($games_info[0]['prize_day']);	
 
 	//batching to 150 since it takes about 2 seconds to go through process and I want to keep max execution time to 60 for each script
 	if($testing){
-		$query = "select * from reminder_email where testuser=1";
+		$query = "select * from emails where testuser=1";
 	}
 	else if($preview){
-		$query = "select * from reminder_email where testuser=1";
+		$query = "select * from emails where testuser=1";
 	}
 	else{
-		$query = "select * from reminder_email left join optout on reminder_email.email=optout.email_optout where reminder_email.last_sent_timestamp<" .  $day_timestamp . " and reminder_email.optout=0 and optout.email_optout is null group by reminder_email.email order by reminder_email.entry_id ASC limit 150";	
+		$query = "select * from emails left join optout on emails.email=optout.email_optout where ";
+		$query .= "emails.last_sent_timestamp<" .  $day_timestamp . " and emails.optout=0 and optout.email_optout is null ";
+		$query .= "group by emails.email order by emails.rem_id ASC limit 150";
 	}
+
 
 	$myDB->execute($query);
 
@@ -212,56 +206,46 @@ if(isset($token) && $token=="AMAZONUSERTOKEN" && $myDB->dataRows()>0){
 		//set last_sent_timestamp for records being used in this batch so another process doesn't double-send
 		$lock_ids = "";
 		for($i=0;$i<sizeof($emails_addresses);$i++){
-			$lock_ids .= $emails_addresses[$i]["entry_id"] . ((isset($emails_addresses[$i+1]["entry_id"]))?",":"");
+			$lock_ids .= $emails_addresses[$i]["rem_id"] . ((isset($emails_addresses[$i+1]["rem_id"]))?",":"");
 		}
-		$query = 'update reminder_email set last_sent_readable="0000-00-00 00:00:00", last_sent_timestamp="' . $day_timestamp .  '" where optout=0 and entry_id in (' . $lock_ids . ')';
-		$myDB->execute($query);
+
+		if(!$testing){
+			$query = 'update sweepsentries set last_sent_readable="0000-00-00 00:00:00", last_sent_timestamp="' . $day_timestamp .  '" where optout=0 and rem_id in (' . $lock_ids . ')';
+			$myDB->execute($query);
+		}
 
 		//echo date('y/m/d H:i:s') . " starting<br/>";
 
 		for($i=0,$count=1,$max_send_per_second=1;$i<sizeof($emails_addresses);$i++,$max_send_per_second++,$count++){
 
-			$mvpd=$emails_addresses[$i]["mvpd"];
+			if(isset($emails_addresses[$i]["mvpd"])){
+				$mvpd=$emails_addresses[$i]["mvpd"];
+			}
+			$mvpd = "xfinity";
 
 			if(isset($override_mvpd)){
 				$mvpd = $override_mvpd;
 			}
-
+			
 			switch($mvpd){
-				case 'mvpd1':
-					$mvpd_qa='7';
-				break;
-
-				case 'mvpd2':
-					$mvpd_qa='8';
-				break;
-
-				case 'mvpd3':
-					$mvpd_qa='10';
-				break;
-				
-				case 'mvpd4':
-					$mvpd_qa='12';
-				break;
-
-				case 'mvpd5':
-					$mvpd_qa='16';
+				default:
+					$mvpd_site_link="http://xfinitytv.comcast.net/ondemand";
 				break;
 
 			}
 
-			if(isset($mvpd_qa)){
-				$todaygames=preg_replace("/MVPDQA/m", $mvpd_qa, $game_html_code);
-				$gamelink=preg_replace("/MVPDQA/m", $mvpd_qa, $gamelink);
-			}
+			$mustemail = new EmailContent($env_config,"mail_body_code.html");
+			$mustemail->getImagePath(false);
+			$mustemail->createEmailBody($games_info);
+			$mustemail->addEmailAddress($emails_addresses[$i]["email"]);
+			$mustemail->addGooglePixel($mvpd);
+			
+			$html = $mustemail->getHTMLCode();
 
 			$text="";		
 
 			$eml=$emails_addresses[$i]["email"];
 			$currentemail = $eml;
-
-			//get essential email display code
-			include(DOCUMENT_ROOT . "match_rem3.0.php");
 
 			/*if($testing || $preview){
 				$handle = fopen(DOCUMENT_ROOT . "validate.html","w");
@@ -272,50 +256,16 @@ if(isset($token) && $token=="AMAZONUSERTOKEN" && $myDB->dataRows()>0){
 			try{	
 				if($sendemail){
 
-					//send amazon boiler plate email
-					/*$result = $client->sendEmail(array(
-					    // Source is required
-					    'Source' => $replyemail,
-					    // Destination is required
-					    'Destination' => array(
-					        'ToAddresses' => array($emails_addresses[$i]["email"])
-					    ),
-					    // Message is required
-					    'Message' => array(
-					    	'From' => 'ESPN World Cup Central',
-					        'Subject' => array(
-					            // Data is required
-					            'Data' => (isset($testsubject))?$testsubject:('Watch The Match - ' . date('F') . ' ' . date('j') . ', 2014'),
-					            'Charset' => 'UTF-8',
-					        ),
-					        // Body is required
-					        'Body' => array(
-					            'Text' => array(
-					                // Data is required
-					                'Data' => $text,
-					                'Charset' => 'UTF-8',
-					            ),
-					            'Html' => array(
-					                // Data is required
-					                'Data' => $html,
-					                'Charset' => 'UTF-8',
-					            )
-					        ),
-					    ),
-					    'ReplyToAddresses' => array($replyemail),
-					    'ReturnPath' => $replyemail
-					));*/
-
 					//create a MIME Bpundary
-					$random_hash = 'Hothouse_PART_' . md5(date('r', time())); 
+					$random_hash = 'Hallmark_PART_' . md5(date('r', time())); 
 
 					$emailtext = 'Return-Path: <' . $replyemail . '>' . "\r\n";
 					$emailtext .= 'Reply-To: <' . $replyemail . '>' . "\r\n";
-					$emailtext .= 'From: "ESPN World Cup Central" <' . $replyemail . '>' . "\r\n";
+					$emailtext .= 'From: "Hallmark Countdown to Christmas" <' . $replyemail . '>' . "\r\n";
 					$emailtext .= 'To: ' . $emails_addresses[$i]["email"] . "\r\n";
-					$emailtext .= 'Subject: ' . ((isset($testsubject))?$testsubject:('Watch The Match - ' . date('F',$email_display_time_stamp) . ' ' . date('j',$email_display_time_stamp) . ', 2014')) . "\r\n";
+					$emailtext .= 'Subject: ' . ((isset($testsubject))?$testsubject:('Unwrap to Win Sweepstakes - ' . date('F',$email_display_time_stamp) . ' ' . date('j',$email_display_time_stamp) . ', 2014')) . "\r\n";
 					$emailtext .= 'Date: ' . date('D, j M Y H:i:s O')  ."\r\n";
-					$emailtext .= 'Message-ID: <' . substr(md5(date('r', time())),0,5) . '-' . substr(md5(date('r', time())),0,5) .'-' . substr(md5(date('r', time())),0,5) . '@hothouseincmail.com>'  ."\r\n";
+					$emailtext .= 'Message-ID: <' . substr(md5(date('r', time())),0,5) . '-' . substr(md5(date('r', time())),0,5) .'-' . substr(md5(date('r', time())),0,5) . '@hallmarkunwraptowin.com>'  ."\r\n";
 					$emailtext .= 'Content-Type: multipart/alternative; ' . "\r\n";
 					$emailtext .= "\t" . 'boundary="' . $random_hash . '"' . "\r\n";
 					$emailtext .= 'MIME-Version: 1.0' ."\r\n\r\n";
@@ -335,15 +285,10 @@ if(isset($token) && $token=="AMAZONUSERTOKEN" && $myDB->dataRows()>0){
 					//use quoted printable content
 					$emailtext .= quoted_printable_encode($html);
 
+					//file_put_contents("email_code.html",$html);
+
 					//end mime boundary with two dashes
 					$emailtext .= '--' . $random_hash  . "--";
-/*
-					if($testing || $preview){
-						$handle = fopen(DOCUMENT_ROOT . "validate.txt","w");
-	    	    		fwrite($handle,$emailtext);
-	        			fclose($handle);
-        			}
-*/
 //        			---REACTIVATE----------
 
         			$result = $client->sendRawEmail(array(
@@ -356,16 +301,24 @@ if(isset($token) && $token=="AMAZONUSERTOKEN" && $myDB->dataRows()>0){
 					    )
 					));
 					
-					if(preg_match("/Error/i",$result)){
+					if(isset($result) && preg_match("/Error/i",$result)){
 						$issues .= $result;
 					}
 					else{
-						$email_ids .= $emails_addresses[$i]["entry_id"] . ((isset($emails_addresses[$i+1]["entry_id"]))?",":"");
+						$email_ids .= $emails_addresses[$i]["rem_id"] . ((isset($emails_addresses[$i+1]["rem_id"]))?",":"");
 					}
 
 					echo $emails_addresses[$i]["email"] . "\n\n";
 					
-					print_r($result) . "\n\n";
+					if(isset($result)){
+						echo $result->get('MessageId') . "\n";
+					}
+
+					//sets email as sent for all matching records with email address
+					if(!$testing){
+						$query = 'update sweepsentries set last_sent_readable="' . $sent_readable .  '",last_sent_timestamp="' . $day_timestamp .  '",aws_message_id="' . $result->get('MessageId') . '" where optout=0 and email regexp"' . $emails_addresses[$i]["email"] . '"';
+						$myDB->execute($query);
+					}
 
 //					-----REACTIVATE--------
 
@@ -382,9 +335,7 @@ if(isset($token) && $token=="AMAZONUSERTOKEN" && $myDB->dataRows()>0){
 			}
 
 
-			//if(isset($emails_addresses[($i + 1)]["email"]) ){
 			if($max_send_per_second>=5){
-			//	echo date('y/m/d H:i:s') . " sleeping<br/>";
 				$max_send_per_second = 0;
 				sleep(1);
 				echo "Restarting-------\n";
@@ -394,31 +345,24 @@ if(isset($token) && $token=="AMAZONUSERTOKEN" && $myDB->dataRows()>0){
 		//-REACTIVATE-  
 		sendAdminEmail(('Batch Finished at: ' . date('y/m/d H:i:s')),("Batch of " . sizeof($emails_addresses) . " emails finished at " . date('y/m/d H:i:s') . "\n Entries for IDs " . $email_ids));
 
-		if(!$preview){
+		if(!$testing && preg_match("/\w/",$email_ids) ){
 			//go ahead and updates addresses to be marked as sent today
 			//--REACTIVATE-- 
 			//final update - only sets last_sent_readable - sort of a confirmation that it is sent
-			$query = 'update reminder_email set last_sent_readable="' . $sent_readable .  '" where optout=0 and entry_id in (' . $email_ids . ')';
-			//--REACTIVATE-- 
+			$query = 'update sweepsentries set last_sent_readable="' . $sent_readable .  '" where optout=0 and rem_id in (' . $email_ids . ')';
 			$myDB->execute($query);
+			//--REACTIVATE-- 
 		}
 
 	}//if($myDB->dataRows()>0)
 	else{
-
 		echo "Sorry contacts from results have already been sent an email\n";
-
-		$cronjob = "*/3 * * * * /usr/bin/php " . DOCUMENT_ROOT . "get_game_data.php" . "\n";
-		$cronfile = '/home/ec2-user/crontab_mailsend.txt';
-		file_put_contents($cronfile, $cronjob);
-		exec('crontab ' . $cronfile);
 	}
 
 }
 else{
-
-	if(isset($token) && $token=="AMAZONUSERTOKEN"){
-		echo "No games today!";	
+	if(isset($token) && $token==$env_config['aws_access_token']){
+		echo "No Prizes today!";	
 	}
 	else{
 		echo "You need the Amazon AWS_ACCESS_KEY_ID to send this email";
